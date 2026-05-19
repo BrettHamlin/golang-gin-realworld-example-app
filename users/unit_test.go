@@ -2,10 +2,12 @@ package users
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -541,6 +543,188 @@ func TestAuthMiddlewareNoToken(t *testing.T) {
 	r.ServeHTTP(w, req)
 	asserts.Equal(http.StatusOK, w.Code, "No token with auto401=false should proceed")
 	asserts.Contains(w.Body.String(), `"user_id":0`, "User ID should be 0")
+}
+
+func newAPIUserFollowingRouter() *gin.Engine {
+	r := gin.New()
+	r.RedirectTrailingSlash = false
+	v1 := r.Group("/api")
+	v1.Use(AuthMiddleware(false))
+	ProfileRetrieveRegister(v1.Group("/profiles"))
+	v1.Use(AuthMiddleware(true))
+	UserRegister(v1.Group("/user"))
+	ProfileRegister(v1.Group("/profiles"))
+	return r
+}
+
+func performUserFollowingRequest(r *gin.Engine, path string, init func(*http.Request)) *httptest.ResponseRecorder {
+	req, _ := http.NewRequest("GET", path, nil)
+	if init != nil {
+		init(req)
+	}
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	return w
+}
+
+func decodeProfilesRaw(t *testing.T, body string) []json.RawMessage {
+	t.Helper()
+	var response struct {
+		Profiles json.RawMessage `json:"profiles"`
+	}
+	if err := json.Unmarshal([]byte(body), &response); err != nil {
+		t.Fatalf("response should be valid JSON: %v; body=%q", err, body)
+	}
+	if string(response.Profiles) == "" {
+		t.Fatalf("profiles key should be present in response body %q", body)
+	}
+	var profiles []json.RawMessage
+	if err := json.Unmarshal(response.Profiles, &profiles); err != nil {
+		t.Fatalf("profiles should be a JSON array: %v; raw=%s", err, response.Profiles)
+	}
+	return profiles
+}
+
+func decodeJSONBody(t *testing.T, body string) interface{} {
+	t.Helper()
+	var decoded interface{}
+	if err := json.Unmarshal([]byte(body), &decoded); err != nil {
+		t.Fatalf("response should be valid JSON: %v; body=%q", err, body)
+	}
+	return decoded
+}
+
+//harness:criterion=c-following-unauth-returns-401,c-following-unauth-trailing-slash-returns-401,c-following-route-registered-under-auth-middleware
+func TestUserFollowingUnauthenticatedRequestsReturn401EmptyBody(t *testing.T) {
+	asserts := assert.New(t)
+	resetDBWithMock()
+	r := newAPIUserFollowingRouter()
+
+	for _, path := range []string{"/api/user/following", "/api/user/following/"} {
+		w := performUserFollowingRequest(r, path, nil)
+		asserts.Equal(http.StatusUnauthorized, w.Code, "unauthenticated request should be rejected for "+path)
+		asserts.Equal("", w.Body.String(), "unauthenticated response body should be empty for "+path)
+	}
+}
+
+//harness:criterion=c-following-invalid-token-returns-401
+func TestUserFollowingInvalidTokenReturns401EmptyBody(t *testing.T) {
+	asserts := assert.New(t)
+	resetDBWithMock()
+	r := newAPIUserFollowingRouter()
+
+	w := performUserFollowingRequest(r, "/api/user/following", func(req *http.Request) {
+		req.Header.Set("Authorization", "Token invalidtoken123")
+	})
+
+	asserts.Equal(http.StatusUnauthorized, w.Code, "malformed token should be rejected")
+	asserts.Equal("", w.Body.String(), "malformed token response body should be empty")
+}
+
+//harness:criterion=c-following-empty-returns-200,c-following-empty-profiles-is-array-not-null,c-following-handler-reads-user-from-context
+func TestUserFollowingEmptyReturnsProfilesArray(t *testing.T) {
+	asserts := assert.New(t)
+	resetDBWithMock()
+	r := newAPIUserFollowingRouter()
+
+	w := performUserFollowingRequest(r, "/api/user/following", func(req *http.Request) {
+		common.HeaderTokenMock(req, 1)
+	})
+
+	asserts.Equal(http.StatusOK, w.Code, "authenticated user with no follows should succeed")
+	var response struct {
+		Profiles json.RawMessage `json:"profiles"`
+	}
+	asserts.NoError(json.Unmarshal(w.Body.Bytes(), &response), "response should be valid JSON")
+	asserts.Equal(json.RawMessage("[]"), response.Profiles, "profiles should encode as an empty array")
+	asserts.JSONEq(`{"profiles":[]}`, w.Body.String(), "empty following response should match contract body")
+}
+
+//harness:criterion=c-following-nonempty-returns-200,c-following-profile-following-field-true,c-following-profile-shape-matches-profileresponse,c-following-handler-reads-user-from-context,c-following-calls-getfollowings-model-method
+func TestUserFollowingNonEmptyReturnsFollowedProfileResponses(t *testing.T) {
+	asserts := assert.New(t)
+	resetDBWithMock()
+	r := newAPIUserFollowingRouter()
+	follower, err := FindOneUser(&UserModel{Username: "user1"})
+	asserts.NoError(err)
+	followed, err := FindOneUser(&UserModel{Username: "user2"})
+	asserts.NoError(err)
+	asserts.NoError(follower.following(followed))
+
+	w := performUserFollowingRequest(r, "/api/user/following", func(req *http.Request) {
+		common.HeaderTokenMock(req, follower.ID)
+	})
+
+	asserts.Equal(http.StatusOK, w.Code, "authenticated user with follows should succeed")
+	profiles := decodeProfilesRaw(t, w.Body.String())
+	asserts.Len(profiles, 1, "profiles should contain exactly the followed users")
+
+	var profile map[string]interface{}
+	asserts.NoError(json.Unmarshal(profiles[0], &profile), "profile should decode as an object")
+	asserts.Equal(followed.Username, profile["username"], "profile username should match followed user")
+	asserts.Equal(followed.Bio, profile["bio"], "profile bio should match followed user")
+	asserts.Equal(*followed.Image, profile["image"], "profile image should match followed user")
+	asserts.Equal(true, profile["following"], "profile following field should be true")
+	asserts.Equal(map[string]bool{
+		"username":  true,
+		"bio":       true,
+		"image":     true,
+		"following": true,
+	}, mapKeys(profile), "profile should expose exactly the ProfileResponse fields")
+}
+
+//harness:criterion=c-following-trailing-slash-same-response
+func TestUserFollowingTrailingSlashMatchesCanonicalResponse(t *testing.T) {
+	asserts := assert.New(t)
+	for _, testData := range []struct {
+		name string
+		init func(*testing.T) uint
+	}{
+		{
+			name: "empty following list",
+			init: func(t *testing.T) uint {
+				return 1
+			},
+		},
+		{
+			name: "non-empty following list",
+			init: func(t *testing.T) uint {
+				t.Helper()
+				follower, err := FindOneUser(&UserModel{Username: "user1"})
+				asserts.NoError(err)
+				followed, err := FindOneUser(&UserModel{Username: "user2"})
+				asserts.NoError(err)
+				asserts.NoError(follower.following(followed))
+				return follower.ID
+			},
+		},
+	} {
+		t.Run(testData.name, func(t *testing.T) {
+			resetDBWithMock()
+			r := newAPIUserFollowingRouter()
+			userID := testData.init(t)
+			setAuth := func(req *http.Request) {
+				common.HeaderTokenMock(req, userID)
+			}
+
+			withoutSlash := performUserFollowingRequest(r, "/api/user/following", setAuth)
+			withSlash := performUserFollowingRequest(r, "/api/user/following/", setAuth)
+
+			asserts.Equal(withoutSlash.Code, withSlash.Code, "status should match")
+			asserts.True(reflect.DeepEqual(
+				decodeJSONBody(t, withoutSlash.Body.String()),
+				decodeJSONBody(t, withSlash.Body.String()),
+			), "JSON body should match")
+		})
+	}
+}
+
+func mapKeys(values map[string]interface{}) map[string]bool {
+	keys := make(map[string]bool, len(values))
+	for key := range values {
+		keys[key] = true
+	}
+	return keys
 }
 
 // This is a hack way to add test database for each case, as whole test will just share one database.

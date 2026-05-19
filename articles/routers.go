@@ -23,6 +23,10 @@ func ArticlesRegister(router *gin.RouterGroup) {
 	router.DELETE("/:slug/comments/:id", ArticleCommentDelete)
 }
 
+func UserArticleRegister(router *gin.RouterGroup) {
+	router.GET("/favorites", UserFavorites)
+}
+
 func ArticlesAnonymousRegister(router *gin.RouterGroup) {
 	router.GET("", ArticleList)
 	router.GET("/", ArticleList)
@@ -59,6 +63,25 @@ func ArticleList(c *gin.Context) {
 	limit := c.Query("limit")
 	offset := c.Query("offset")
 	articleModels, modelCount, err := FindManyArticle(tag, author, limit, offset, favorited)
+	if err != nil {
+		c.JSON(http.StatusNotFound, common.NewError("articles", errors.New("Invalid param")))
+		return
+	}
+	serializer := ArticlesSerializer{c, articleModels}
+	c.JSON(http.StatusOK, gin.H{"articles": serializer.Response(), "articlesCount": modelCount})
+}
+
+func UserFavorites(c *gin.Context) {
+	limit := c.Query("limit")
+	offset := c.Query("offset")
+	myUserModel := c.MustGet("my_user_model").(users.UserModel)
+	if myUserModel.ID == 0 {
+		c.AbortWithError(http.StatusUnauthorized, errors.New("{error : \"Require auth!\"}"))
+		return
+	}
+
+	articleUserModel := GetArticleUserModel(myUserModel)
+	articleModels, modelCount, err := FindManyArticle("", "", limit, offset, articleUserModel.UserModel.Username)
 	if err != nil {
 		c.JSON(http.StatusNotFound, common.NewError("articles", errors.New("Invalid param")))
 		return

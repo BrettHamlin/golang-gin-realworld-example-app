@@ -46,7 +46,9 @@ func main() {
 	users.ProfileRetrieveRegister(v1.Group("/profiles"))
 
 	v1.Use(users.AuthMiddleware(true))
-	users.UserRegister(v1.Group("/user"))
+	userGroup := v1.Group("/user")
+	users.UserRegister(userGroup)
+	articles.UserArticleRegister(userGroup)
 	users.ProfileRegister(v1.Group("/profiles"))
 
 	articles.ArticlesRegister(v1.Group("/articles"))

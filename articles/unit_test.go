@@ -2,10 +2,12 @@ package articles
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -30,6 +32,7 @@ func setupRouter() *gin.Engine {
 
 	v1.Use(users.AuthMiddleware(true))
 	ArticlesRegister(v1.Group("/articles"))
+	UserArticleRegister(v1.Group("/user"))
 
 	return r
 }
@@ -798,6 +801,243 @@ func followUser(follower, following users.UserModel) error {
 		FollowedByID: follower.ID,
 	}).Error
 	return err
+}
+
+func decodeJSONBody(t *testing.T, body *bytes.Buffer) map[string]interface{} {
+	t.Helper()
+	var response map[string]interface{}
+	if err := json.Unmarshal(body.Bytes(), &response); err != nil {
+		t.Fatalf("response should be valid JSON: %v; body=%s", err, body.String())
+	}
+	return response
+}
+
+func responseArticles(t *testing.T, response map[string]interface{}) []interface{} {
+	t.Helper()
+	articlesValue, ok := response["articles"]
+	if !ok {
+		t.Fatalf("response missing articles key: %#v", response)
+	}
+	articles, ok := articlesValue.([]interface{})
+	if !ok {
+		t.Fatalf("articles should be a JSON array, got %T", articlesValue)
+	}
+	return articles
+}
+
+func responseArticlesCount(t *testing.T, response map[string]interface{}) int {
+	t.Helper()
+	countValue, ok := response["articlesCount"]
+	if !ok {
+		t.Fatalf("response missing articlesCount key: %#v", response)
+	}
+	countFloat, ok := countValue.(float64)
+	if !ok {
+		t.Fatalf("articlesCount should be a JSON number, got %T", countValue)
+	}
+	return int(countFloat)
+}
+
+func articleBySlug(t *testing.T, articles []interface{}, slug string) map[string]interface{} {
+	t.Helper()
+	for _, articleValue := range articles {
+		article, ok := articleValue.(map[string]interface{})
+		if !ok {
+			t.Fatalf("article should be a JSON object, got %T", articleValue)
+		}
+		if article["slug"] == slug {
+			return article
+		}
+	}
+	t.Fatalf("article with slug %q not found in %#v", slug, articles)
+	return nil
+}
+
+func jsonValueTypes(values map[string]interface{}) map[string]string {
+	types := make(map[string]string)
+	for key, value := range values {
+		valueType := reflect.TypeOf(value)
+		if valueType == nil {
+			types[key] = "<nil>"
+			continue
+		}
+		types[key] = valueType.String()
+	}
+	return types
+}
+
+//harness:criterion=c-favorites-unauth-returns-401,c-favorites-route-protected-by-authmiddleware
+func TestUserFavoritesUnauthenticatedReturns401(t *testing.T) {
+	asserts := assert.New(t)
+	r := setupRouter()
+
+	req, _ := http.NewRequest("GET", "/api/user/favorites", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	asserts.Equal(http.StatusUnauthorized, w.Code, "Favorites without auth should return 401")
+}
+
+//harness:criterion=c-favorites-invalid-token-returns-401,c-favorites-route-protected-by-authmiddleware
+func TestUserFavoritesInvalidTokenReturns401WithoutArticles(t *testing.T) {
+	asserts := assert.New(t)
+	r := setupRouter()
+
+	req, _ := http.NewRequest("GET", "/api/user/favorites", nil)
+	req.Header.Set("Authorization", "Token thisisnotavalidjwt.malformed.token")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	asserts.Equal(http.StatusUnauthorized, w.Code, "Favorites with malformed token should return 401")
+	var response map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err == nil {
+		_, hasArticles := response["articles"]
+		asserts.False(hasArticles, "401 response should not include article data")
+	} else {
+		asserts.NotContains(w.Body.String(), "articles", "401 response should not include article data")
+	}
+}
+
+//harness:criterion=c-favorites-auth-no-favorites-returns-200,c-favorites-articles-not-null-when-empty,c-favorites-count-matches-array-length,c-favorites-setup-router-extended
+func TestUserFavoritesAuthenticatedNoFavoritesReturnsEmptyArray(t *testing.T) {
+	asserts := assert.New(t)
+	r := setupRouter()
+	user := createTestUser()
+
+	req, _ := http.NewRequest("GET", "/api/user/favorites", nil)
+	common.HeaderTokenMock(req, user.ID)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	asserts.Equal(http.StatusOK, w.Code, "Favorites with no favorited articles should return 200")
+	response := decodeJSONBody(t, w.Body)
+	articles := responseArticles(t, response)
+	articlesCount := responseArticlesCount(t, response)
+
+	asserts.Equal(0, articlesCount, "articlesCount should be 0")
+	asserts.Equal(0, len(articles), "articles should be an empty JSON array")
+	asserts.Equal(len(articles), articlesCount, "articlesCount should match articles length")
+}
+
+//harness:criterion=c-favorites-auth-with-favorite-returns-200,c-favorites-response-shape-matches-articlelist,c-favorites-count-matches-array-length,c-favorites-uses-findmanyarticle-favorited-filter,c-favorites-serialized-with-articlesserializer
+func TestUserFavoritesAuthenticatedWithFavoriteReturnsArticleShape(t *testing.T) {
+	asserts := assert.New(t)
+	r := setupRouter()
+	user := createTestUser()
+	author := createTestUser()
+	articleUserModel := GetArticleUserModel(user)
+	authorArticleUserModel := GetArticleUserModel(author)
+
+	favoritedSlug := fmt.Sprintf("user-favorite-article-%d", common.RandInt())
+	favoritedArticle := ArticleModel{
+		Slug:        favoritedSlug,
+		Title:       "User Favorite Article",
+		Description: "Favorite Description",
+		Body:        "Favorite Body",
+		Author:      authorArticleUserModel,
+		AuthorID:    authorArticleUserModel.ID,
+	}
+	favoritedArticle.setTags([]string{"favorites", "contract"})
+	asserts.NoError(SaveOne(&favoritedArticle))
+	asserts.NoError(favoritedArticle.favoriteBy(articleUserModel))
+
+	unfavoritedSlug := fmt.Sprintf("user-unfavorited-article-%d", common.RandInt())
+	unfavoritedArticle := ArticleModel{
+		Slug:        unfavoritedSlug,
+		Title:       "User Unfavorited Article",
+		Description: "Unfavorited Description",
+		Body:        "Unfavorited Body",
+		Author:      authorArticleUserModel,
+		AuthorID:    authorArticleUserModel.ID,
+	}
+	asserts.NoError(SaveOne(&unfavoritedArticle))
+
+	req, _ := http.NewRequest("GET", "/api/user/favorites", nil)
+	common.HeaderTokenMock(req, user.ID)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	asserts.Equal(http.StatusOK, w.Code, "Favorites with a favorited article should return 200")
+	response := decodeJSONBody(t, w.Body)
+	articles := responseArticles(t, response)
+	articlesCount := responseArticlesCount(t, response)
+	asserts.Equal(1, articlesCount, "articlesCount should include only favorited articles")
+	asserts.Equal(len(articles), articlesCount, "articlesCount should match articles length")
+
+	favoriteArticle := articleBySlug(t, articles, favoritedSlug)
+	asserts.Equal(favoritedSlug, favoriteArticle["slug"], "Favorited article slug should be returned")
+	asserts.NotEqual(unfavoritedSlug, favoriteArticle["slug"], "Unfavorited article should not be returned")
+
+	requiredKeys := []string{
+		"slug", "title", "description", "body", "tagList", "createdAt", "updatedAt", "favorited", "favoritesCount", "author",
+	}
+	for _, key := range requiredKeys {
+		_, ok := favoriteArticle[key]
+		asserts.True(ok, "favorite article response should include %s", key)
+	}
+	asserts.Contains(response, "articles", "response should include the ArticleList envelope articles key")
+	asserts.Contains(response, "articlesCount", "response should include the ArticleList envelope articlesCount key")
+
+	listReq, _ := http.NewRequest("GET", fmt.Sprintf("/api/articles?favorited=%s", user.Username), nil)
+	common.HeaderTokenMock(listReq, user.ID)
+	listW := httptest.NewRecorder()
+	r.ServeHTTP(listW, listReq)
+	asserts.Equal(http.StatusOK, listW.Code, "ArticleList favorited filter should return 200")
+	listResponse := decodeJSONBody(t, listW.Body)
+	listArticle := articleBySlug(t, responseArticles(t, listResponse), favoritedSlug)
+	asserts.Equal(jsonValueTypes(listArticle), jsonValueTypes(favoriteArticle), "favorites article shape should match ArticleList article shape")
+}
+
+//harness:criterion=c-favorites-handler-reads-user-from-context
+func TestUserFavoritesIgnoresUsernameQueryParam(t *testing.T) {
+	asserts := assert.New(t)
+	r := setupRouter()
+	userWithFavorite := createTestUser()
+	userWithoutFavorite := createTestUser()
+	author := createTestUser()
+
+	articleUserWithFavorite := GetArticleUserModel(userWithFavorite)
+	authorArticleUserModel := GetArticleUserModel(author)
+	article := ArticleModel{
+		Slug:        fmt.Sprintf("query-param-favorite-%d", common.RandInt()),
+		Title:       "Query Param Favorite",
+		Description: "Favorite Description",
+		Body:        "Favorite Body",
+		Author:      authorArticleUserModel,
+		AuthorID:    authorArticleUserModel.ID,
+	}
+	asserts.NoError(SaveOne(&article))
+	asserts.NoError(article.favoriteBy(articleUserWithFavorite))
+
+	req, _ := http.NewRequest("GET", fmt.Sprintf("/api/user/favorites?username=%s", userWithFavorite.Username), nil)
+	common.HeaderTokenMock(req, userWithoutFavorite.ID)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	asserts.Equal(http.StatusOK, w.Code, "Favorites should use the authenticated user even when username query is present")
+	response := decodeJSONBody(t, w.Body)
+	articles := responseArticles(t, response)
+	asserts.Equal(0, responseArticlesCount(t, response), "User without favorites should still have no favorites")
+	asserts.Equal(0, len(articles), "Username query param should not select another user's favorites")
+}
+
+//harness:criterion=c-favorites-route-mounted-under-api-user,c-favorites-registration-function-exported,c-favorites-hello-calls-register-function,c-favorites-setup-router-extended
+func TestUserFavoritesRouteMountedUnderAPIUser(t *testing.T) {
+	asserts := assert.New(t)
+	r := setupRouter()
+	user := createTestUser()
+
+	req, _ := http.NewRequest("GET", "/api/user/favorites", nil)
+	common.HeaderTokenMock(req, user.ID)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	asserts.NotEqual(http.StatusNotFound, w.Code, "Favorites should be reachable under /api/user/favorites")
+
+	req, _ = http.NewRequest("GET", "/favorites", nil)
+	common.HeaderTokenMock(req, user.ID)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	asserts.Equal(http.StatusNotFound, w.Code, "Favorites should not be mounted at /favorites")
 }
 
 func TestTagsEndpoint(t *testing.T) {

@@ -35,6 +35,18 @@ codegen:
   cli_provider: codex-cli
   default_model: gpt-5.5
 
+stages:
+  planner:
+    explore_model: gpt-5.5
+  code_gen_feature:
+    model: gpt-5.5
+    timeout_s: 21600
+  code_gen_test:
+    model: gpt-5.5
+  code_gen_e2e_test:
+    model: gpt-5.5
+    timeout_s: 21600
+
 ci:
   provider: github-actions
   build:

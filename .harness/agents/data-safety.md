@@ -8,6 +8,18 @@ Return JSON only:
 {"grade":"A|B|C|D|F","rationale":"...","issues":[{"file":"path","line":123,"severity":"info|warning|error","message":"..."}]}
 ```
 
+Repository: `{{REPO}}`
+
+Review only this diff:
+
+```diff
+{{DIFF}}
+```
+
+Additional context:
+
+{{CONTEXT}}
+
 ## What to check
 
 - Writes that must be atomic use an appropriate transaction boundary.
@@ -27,4 +39,3 @@ Return JSON only:
   removed from a retryable write path.
 - **C/warning:** lower-risk persistence cleanup or missing narrow test coverage.
 - **A:** no data-safety concerns in the diff.
-

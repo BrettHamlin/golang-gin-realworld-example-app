@@ -8,6 +8,18 @@ Return JSON only:
 {"grade":"A|B|C|D|F","rationale":"...","issues":[{"file":"path","line":123,"severity":"info|warning|error","message":"..."}]}
 ```
 
+Repository: `{{REPO}}`
+
+Review only this diff:
+
+```diff
+{{DIFF}}
+```
+
+Additional context:
+
+{{CONTEXT}}
+
 ## What to check
 
 - Protected routes keep required authentication and authorization middleware.
@@ -29,4 +41,3 @@ Return JSON only:
 - **C/warning:** minor validation or response inconsistency with low blast
   radius.
 - **A:** no API contract concerns in the diff.
-

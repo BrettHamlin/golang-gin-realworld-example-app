@@ -2,10 +2,12 @@ package users
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -484,6 +486,128 @@ func TestWithoutAuth(t *testing.T) {
 
 		asserts.Equal(testData.expectedCode, w.Code, "Response Status - "+testData.msg)
 		asserts.Regexp(testData.responseRegexg, w.Body.String(), "Response Content - "+testData.msg)
+	}
+}
+
+type userFollowingResponse struct {
+	Profiles []ProfileResponse `json:"profiles"`
+}
+
+func newUserFollowingTestRouter() *gin.Engine {
+	r := gin.New()
+	v1 := r.Group("/api")
+	v1.Use(AuthMiddleware(false))
+	ProfileRetrieveRegister(v1.Group("/profiles"))
+	v1.Use(AuthMiddleware(true))
+	UserRegister(v1.Group("/user"))
+	ProfileRegister(v1.Group("/profiles"))
+	return r
+}
+
+func performUserFollowingRequest(r *gin.Engine, method string, url string, userID uint) *httptest.ResponseRecorder {
+	req, _ := http.NewRequest(method, url, nil)
+	if userID != 0 {
+		common.HeaderTokenMock(req, userID)
+	}
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	return w
+}
+
+//harness:criterion=c-get-following-unauthenticated-401,c-get-following-route-registered-under-auth-group,c-get-following-invalid-token-401
+func TestUserFollowingAuthFailures(t *testing.T) {
+	asserts := assert.New(t)
+	resetDBWithMock()
+	r := newUserFollowingTestRouter()
+
+	req, _ := http.NewRequest("GET", "/api/user/following", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	asserts.Equal(http.StatusUnauthorized, w.Code, "request without token should return 401")
+
+	req, _ = http.NewRequest("GET", "/api/user/following", nil)
+	req.Header.Set("Authorization", "Token invalid.token.value")
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	asserts.Equal(http.StatusUnauthorized, w.Code, "request with malformed token should return 401")
+}
+
+//harness:criterion=c-get-following-authenticated-200,c-get-following-response-has-profiles-key,c-get-following-empty-returns-array-not-null,c-get-following-content-type-json
+func TestUserFollowingEmptyResponse(t *testing.T) {
+	asserts := assert.New(t)
+	resetDBWithMock()
+	r := newUserFollowingTestRouter()
+
+	w := performUserFollowingRequest(r, "GET", "/api/user/following", 1)
+	asserts.Equal(http.StatusOK, w.Code, "authenticated request should return 200")
+	asserts.Contains(w.Header().Get("Content-Type"), "application/json", "response should be JSON")
+
+	var raw map[string]json.RawMessage
+	asserts.NoError(json.Unmarshal(w.Body.Bytes(), &raw), "response should be valid JSON")
+	profiles, ok := raw["profiles"]
+	asserts.True(ok, "response should include top-level profiles key")
+	asserts.Equal("[]", strings.TrimSpace(string(profiles)), "profiles should be an empty JSON array")
+
+	var body userFollowingResponse
+	asserts.NoError(json.Unmarshal(w.Body.Bytes(), &body), "response should match following response shape")
+	asserts.NotNil(body.Profiles, "profiles slice should not be nil")
+	asserts.Len(body.Profiles, 0, "profiles should be empty when user follows nobody")
+}
+
+//harness:criterion=c-get-following-populated-returns-all-followed-profiles,c-get-following-profile-shape-username,c-get-following-profile-shape-bio,c-get-following-profile-shape-image,c-get-following-profile-shape-following-true
+func TestUserFollowingPopulatedResponse(t *testing.T) {
+	asserts := assert.New(t)
+	resetDBWithMock()
+	r := newUserFollowingTestRouter()
+
+	followUser2 := performUserFollowingRequest(r, "POST", "/api/profiles/user2/follow", 1)
+	asserts.Equal(http.StatusOK, followUser2.Code, "setup follow for user2 should succeed")
+	followUser3 := performUserFollowingRequest(r, "POST", "/api/profiles/user3/follow", 1)
+	asserts.Equal(http.StatusOK, followUser3.Code, "setup follow for user3 should succeed")
+
+	w := performUserFollowingRequest(r, "GET", "/api/user/following", 1)
+	asserts.Equal(http.StatusOK, w.Code, "authenticated request should return 200")
+
+	var body userFollowingResponse
+	asserts.NoError(json.Unmarshal(w.Body.Bytes(), &body), "response should match following response shape")
+	asserts.Len(body.Profiles, 2, "profiles should contain exactly the followed users")
+
+	byUsername := map[string]ProfileResponse{}
+	for _, profile := range body.Profiles {
+		byUsername[profile.Username] = profile
+		asserts.True(profile.Following, "every returned profile should have following=true")
+	}
+
+	user2, ok := byUsername["user2"]
+	asserts.True(ok, "profiles should include followed user2")
+	asserts.Equal("bio2", user2.Bio, "user2 bio should match stored profile")
+	asserts.Equal("http://image/2.jpg", user2.Image, "user2 image should match stored profile")
+
+	user3, ok := byUsername["user3"]
+	asserts.True(ok, "profiles should include followed user3")
+	asserts.Equal("bio3", user3.Bio, "user3 bio should match stored profile")
+	asserts.Equal("http://image/3.jpg", user3.Image, "user3 image should match stored profile")
+}
+
+//harness:criterion=c-get-following-does-not-include-unfollowed-profiles
+func TestUserFollowingExcludesUnfollowedAndNeverFollowedProfiles(t *testing.T) {
+	asserts := assert.New(t)
+	resetDBWithMock()
+	r := newUserFollowingTestRouter()
+
+	followUser2 := performUserFollowingRequest(r, "POST", "/api/profiles/user2/follow", 1)
+	asserts.Equal(http.StatusOK, followUser2.Code, "setup follow for user2 should succeed")
+	unfollowUser2 := performUserFollowingRequest(r, "DELETE", "/api/profiles/user2/follow", 1)
+	asserts.Equal(http.StatusOK, unfollowUser2.Code, "setup unfollow for user2 should succeed")
+
+	w := performUserFollowingRequest(r, "GET", "/api/user/following", 1)
+	asserts.Equal(http.StatusOK, w.Code, "authenticated request should return 200")
+
+	var body userFollowingResponse
+	asserts.NoError(json.Unmarshal(w.Body.Bytes(), &body), "response should match following response shape")
+	for _, profile := range body.Profiles {
+		asserts.NotEqual("user2", profile.Username, "unfollowed profile should not be returned")
+		asserts.NotEqual("user3", profile.Username, "never-followed profile should not be returned")
 	}
 }
 

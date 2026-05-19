@@ -28,6 +28,14 @@ they are absent from this cluster. Make that blocking only when the provided
 diff/context explicitly proves the API wiring is broken or build/test evidence
 confirms it; otherwise report the uncertainty as non-blocking.
 
+Build/test stages are the authoritative gate for compile and link failures. Do
+not assign D/F for "missing definition", "undefined symbol", "will not compile",
+or "import target absent" based only on absence from this cluster. Surface those
+as info/advisory unless build/test evidence is present. Cross-file semantic
+concerns that build cannot prove, including contract mismatch, auth boundary
+drift, response-shape drift, or route shadowing, remain in scope at
+warning/error severity when the reviewed diff supports them.
+
 ## What to check
 
 - Protected routes keep required authentication and authorization middleware.

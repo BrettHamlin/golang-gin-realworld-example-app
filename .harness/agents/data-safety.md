@@ -28,6 +28,14 @@ they are absent from this cluster. Make that blocking only when the provided
 diff/context explicitly proves the data path is broken or build/test evidence
 confirms it; otherwise report the uncertainty as non-blocking.
 
+Build/test stages are the authoritative gate for compile and link failures. Do
+not assign D/F for "missing definition", "undefined symbol", "will not compile",
+or "import target absent" based only on absence from this cluster. Surface those
+as info/advisory unless build/test evidence is present. Cross-file semantic
+concerns that build cannot prove, including missing ownership scoping,
+transaction-boundary loss, audit/data-integrity gaps, or destructive writes,
+remain in scope at warning/error severity when the reviewed diff supports them.
+
 ## What to check
 
 - Writes that must be atomic use an appropriate transaction boundary.

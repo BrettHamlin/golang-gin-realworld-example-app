@@ -20,6 +20,14 @@ Additional context:
 
 {{CONTEXT}}
 
+## Scope note
+
+This diff may be one progressive-review cluster from a larger PR. Do not mark
+registrations, definitions, imports, or handler wiring as missing solely because
+they are absent from this cluster. Make that blocking only when the provided
+diff/context explicitly proves the API wiring is broken or build/test evidence
+confirms it; otherwise report the uncertainty as non-blocking.
+
 ## What to check
 
 - Protected routes keep required authentication and authorization middleware.

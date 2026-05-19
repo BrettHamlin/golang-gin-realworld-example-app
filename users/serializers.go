@@ -11,6 +11,11 @@ type ProfileSerializer struct {
 	UserModel
 }
 
+type ProfilesSerializer struct {
+	C     *gin.Context
+	Users []UserModel
+}
+
 // Declare your response schema here
 type ProfileResponse struct {
 	ID        uint   `json:"-"`
@@ -35,6 +40,15 @@ func (self *ProfileSerializer) Response() ProfileResponse {
 		Following: myUserModel.isFollowing(self.UserModel),
 	}
 	return profile
+}
+
+func (self *ProfilesSerializer) Response() []ProfileResponse {
+	response := []ProfileResponse{}
+	for _, user := range self.Users {
+		serializer := ProfileSerializer{C: self.C, UserModel: user}
+		response = append(response, serializer.Response())
+	}
+	return response
 }
 
 type UserSerializer struct {

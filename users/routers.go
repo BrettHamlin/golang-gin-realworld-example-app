@@ -16,8 +16,13 @@ func UsersRegister(router *gin.RouterGroup) {
 func UserRegister(router *gin.RouterGroup) {
 	router.GET("", UserRetrieve)
 	router.GET("/", UserRetrieve)
+	router.GET("/following", UserFollowing)
 	router.PUT("", UserUpdate)
 	router.PUT("/", UserUpdate)
+	router.POST("/following", methodNotAllowed)
+	router.PUT("/following", methodNotAllowed)
+	router.PATCH("/following", methodNotAllowed)
+	router.DELETE("/following", methodNotAllowed)
 }
 
 func ProfileRetrieveRegister(router *gin.RouterGroup) {
@@ -118,6 +123,12 @@ func UserRetrieve(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"user": serializer.Response()})
 }
 
+func UserFollowing(c *gin.Context) {
+	myUserModel := c.MustGet("my_user_model").(UserModel)
+	serializer := ProfilesSerializer{C: c, Users: myUserModel.GetFollowings()}
+	c.JSON(http.StatusOK, gin.H{"profiles": serializer.Response()})
+}
+
 func UserUpdate(c *gin.Context) {
 	myUserModel := c.MustGet("my_user_model").(UserModel)
 	userModelValidator := NewUserModelValidatorFillWith(myUserModel)
@@ -134,4 +145,8 @@ func UserUpdate(c *gin.Context) {
 	UpdateContextUserModel(c, myUserModel.ID)
 	serializer := UserSerializer{c}
 	c.JSON(http.StatusOK, gin.H{"user": serializer.Response()})
+}
+
+func methodNotAllowed(c *gin.Context) {
+	c.AbortWithStatus(http.StatusMethodNotAllowed)
 }

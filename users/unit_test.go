@@ -2,13 +2,16 @@ package users
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/gothinkster/golang-gin-realworld-example-app/common"
 	"github.com/stretchr/testify/assert"
 	"gorm.io/gorm"
@@ -541,6 +544,146 @@ func TestAuthMiddlewareNoToken(t *testing.T) {
 	r.ServeHTTP(w, req)
 	asserts.Equal(http.StatusOK, w.Code, "No token with auto401=false should proceed")
 	asserts.Contains(w.Body.String(), `"user_id":0`, "User ID should be 0")
+}
+
+func newFollowingEndpointTestRouter() *gin.Engine {
+	r := gin.New()
+	r.Use(AuthMiddleware(true))
+	UserRegister(r.Group("/api/user"))
+	return r
+}
+
+func performFollowingEndpointRequest(router *gin.Engine, method string, authHeader string) *httptest.ResponseRecorder {
+	req, _ := http.NewRequest(method, "/api/user/following", nil)
+	if authHeader != "" {
+		req.Header.Set("Authorization", authHeader)
+	}
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	return w
+}
+
+func performFollowingEndpointRequestForUser(router *gin.Engine, method string, userID uint) *httptest.ResponseRecorder {
+	req, _ := http.NewRequest(method, "/api/user/following", nil)
+	common.HeaderTokenMock(req, userID)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	return w
+}
+
+func expiredToken(id uint) string {
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"id":  id,
+		"exp": time.Now().Add(-time.Hour).Unix(),
+	})
+	signed, err := token.SignedString([]byte(common.JWTSecret))
+	if err != nil {
+		panic(err)
+	}
+	return signed
+}
+
+func decodeFollowingEndpointBody(t *testing.T, body string) map[string]json.RawMessage {
+	t.Helper()
+	var parsed map[string]json.RawMessage
+	assert.NoError(t, json.Unmarshal([]byte(body), &parsed))
+	return parsed
+}
+
+func decodeFollowingProfiles(t *testing.T, body string) []map[string]interface{} {
+	t.Helper()
+	parsed := decodeFollowingEndpointBody(t, body)
+	var profiles []map[string]interface{}
+	assert.NoError(t, json.Unmarshal(parsed["profiles"], &profiles))
+	return profiles
+}
+
+func TestUserFollowingEndpointRequiresAuth(t *testing.T) {
+	asserts := assert.New(t)
+	resetDBWithMock()
+	router := newFollowingEndpointTestRouter()
+
+	//harness:criterion=c-following-unauthenticated-returns-401,c-following-route-registered-under-auth-middleware
+	w := performFollowingEndpointRequest(router, http.MethodGet, "")
+
+	asserts.Equal(http.StatusUnauthorized, w.Code)
+}
+
+func TestUserFollowingEndpointRejectsInvalidTokens(t *testing.T) {
+	asserts := assert.New(t)
+	resetDBWithMock()
+	router := newFollowingEndpointTestRouter()
+
+	//harness:criterion=c-following-invalid-token-returns-401
+	for _, authHeader := range []string{
+		"Token thisisnotavalidtoken",
+		"Token " + expiredToken(1),
+	} {
+		w := performFollowingEndpointRequest(router, http.MethodGet, authHeader)
+		asserts.Equal(http.StatusUnauthorized, w.Code, "auth header %q should be rejected", authHeader)
+	}
+}
+
+func TestUserFollowingEndpointEmptyResponse(t *testing.T) {
+	asserts := assert.New(t)
+	resetDBWithMock()
+	router := newFollowingEndpointTestRouter()
+
+	//harness:criterion=c-following-authenticated-returns-200,c-following-empty-returns-empty-array,c-following-response-envelope-key-is-profiles
+	w := performFollowingEndpointRequestForUser(router, http.MethodGet, 1)
+
+	asserts.Equal(http.StatusOK, w.Code)
+	body := decodeFollowingEndpointBody(t, w.Body.String())
+	asserts.Len(body, 1)
+	asserts.Contains(body, "profiles")
+
+	var profiles []map[string]interface{}
+	asserts.NoError(json.Unmarshal(body["profiles"], &profiles))
+	asserts.NotNil(profiles, "profiles should be an empty array, not null")
+	asserts.Len(profiles, 0)
+}
+
+func TestUserFollowingEndpointReturnsFollowedProfiles(t *testing.T) {
+	asserts := assert.New(t)
+	resetDBWithMock()
+	router := newFollowingEndpointTestRouter()
+
+	follower, err := FindOneUser(&UserModel{Username: "user1"})
+	asserts.NoError(err)
+	followed, err := FindOneUser(&UserModel{Username: "user2"})
+	asserts.NoError(err)
+	asserts.NoError(follower.following(followed))
+
+	//harness:criterion=c-following-nonempty-returns-profile-objects,c-following-profile-following-field-true,c-following-profile-fields-present,c-following-calls-get-followings-model-method
+	w := performFollowingEndpointRequestForUser(router, http.MethodGet, follower.ID)
+
+	asserts.Equal(http.StatusOK, w.Code)
+	profiles := decodeFollowingProfiles(t, w.Body.String())
+	if !asserts.Len(profiles, 1) {
+		return
+	}
+
+	profile := profiles[0]
+	asserts.Len(profile, 4)
+	for _, key := range []string{"username", "bio", "image", "following"} {
+		asserts.Contains(profile, key)
+	}
+	asserts.Equal(followed.Username, profile["username"])
+	asserts.Equal(followed.Bio, profile["bio"])
+	asserts.Equal(*followed.Image, profile["image"])
+	asserts.Equal(true, profile["following"])
+}
+
+func TestUserFollowingEndpointWrongMethodsReturnMethodNotAllowed(t *testing.T) {
+	asserts := assert.New(t)
+	resetDBWithMock()
+	router := newFollowingEndpointTestRouter()
+
+	//harness:criterion=c-following-wrong-http-method-returns-405
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
+		w := performFollowingEndpointRequestForUser(router, method, 1)
+		asserts.Equal(http.StatusMethodNotAllowed, w.Code, "%s should not be allowed", method)
+	}
 }
 
 // This is a hack way to add test database for each case, as whole test will just share one database.

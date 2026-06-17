@@ -16,6 +16,8 @@ func UsersRegister(router *gin.RouterGroup) {
 func UserRegister(router *gin.RouterGroup) {
 	router.GET("", UserRetrieve)
 	router.GET("/", UserRetrieve)
+	router.GET("/following", UserFollowing)
+	router.GET("/following/", UserFollowing)
 	router.PUT("", UserUpdate)
 	router.PUT("/", UserUpdate)
 }
@@ -116,6 +118,17 @@ func UsersLogin(c *gin.Context) {
 func UserRetrieve(c *gin.Context) {
 	serializer := UserSerializer{c}
 	c.JSON(http.StatusOK, gin.H{"user": serializer.Response()})
+}
+
+func UserFollowing(c *gin.Context) {
+	myUserModel := c.MustGet("my_user_model").(UserModel)
+	followings := myUserModel.GetFollowings()
+	profiles := make([]ProfileResponse, 0, len(followings))
+	for _, following := range followings {
+		serializer := ProfileSerializer{c, following}
+		profiles = append(profiles, serializer.Response())
+	}
+	c.JSON(http.StatusOK, gin.H{"profiles": profiles})
 }
 
 func UserUpdate(c *gin.Context) {

@@ -2,6 +2,7 @@ package users
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -459,6 +460,7 @@ var unauthRequestTests = []struct {
 	},
 }
 
+//harness:criterion=c-following-existing-routes-unmodified
 func TestWithoutAuth(t *testing.T) {
 	asserts := assert.New(t)
 	//You could write the reset database code here if you want to create a database for this block
@@ -541,6 +543,124 @@ func TestAuthMiddlewareNoToken(t *testing.T) {
 	r.ServeHTTP(w, req)
 	asserts.Equal(http.StatusOK, w.Code, "No token with auto401=false should proceed")
 	asserts.Contains(w.Body.String(), `"user_id":0`, "User ID should be 0")
+}
+
+func newUserFollowingTestRouter() *gin.Engine {
+	r := gin.New()
+	v1 := r.Group("/api")
+	v1.Use(AuthMiddleware(false))
+	v1.Use(AuthMiddleware(true))
+	UserRegister(v1.Group("/user"))
+	return r
+}
+
+//harness:criterion=c-following-unauthenticated-returns-401,c-following-invalid-token-returns-401,c-following-route-registered-under-user-group,c-following-uses-auth-middleware
+func TestUserFollowingEndpointRequiresAuth(t *testing.T) {
+	asserts := assert.New(t)
+	resetDBWithMock()
+
+	tests := []struct {
+		name string
+		auth string
+	}{
+		{"missing authorization header", ""},
+		{"malformed token", "Token invalidtoken123"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, err := http.NewRequest("GET", "/api/user/following", nil)
+			asserts.NoError(err)
+			if tt.auth != "" {
+				req.Header.Set("Authorization", tt.auth)
+			}
+
+			w := httptest.NewRecorder()
+			newUserFollowingTestRouter().ServeHTTP(w, req)
+
+			asserts.Equal(http.StatusUnauthorized, w.Code)
+			asserts.NotEqual(http.StatusNotFound, w.Code)
+		})
+	}
+}
+
+//harness:criterion=c-following-authenticated-no-followings-returns-200,c-following-empty-result-is-array-not-null,c-following-response-contains-profiles-key
+func TestUserFollowingEndpointReturnsEmptyProfilesArray(t *testing.T) {
+	asserts := assert.New(t)
+	resetDBWithMock()
+
+	req, err := http.NewRequest("GET", "/api/user/following", nil)
+	asserts.NoError(err)
+	common.HeaderTokenMock(req, 1)
+
+	w := httptest.NewRecorder()
+	newUserFollowingTestRouter().ServeHTTP(w, req)
+
+	asserts.Equal(http.StatusOK, w.Code)
+
+	var body map[string]json.RawMessage
+	asserts.NoError(json.Unmarshal(w.Body.Bytes(), &body))
+	profilesJSON, ok := body["profiles"]
+	asserts.True(ok, "response should contain profiles key")
+
+	var profiles []ProfileResponse
+	asserts.NoError(json.Unmarshal(profilesJSON, &profiles))
+	asserts.NotNil(profiles, "profiles should be an empty JSON array instead of null")
+	asserts.Len(profiles, 0)
+}
+
+//harness:criterion=c-following-authenticated-with-followings-returns-200,c-following-response-contains-profiles-key,c-following-profiles-contain-required-fields,c-following-field-always-true,c-following-correct-profiles-returned
+func TestUserFollowingEndpointReturnsFollowedProfiles(t *testing.T) {
+	asserts := assert.New(t)
+	resetDBWithMock()
+
+	currentUser, err := FindOneUser(&UserModel{Username: "user1"})
+	asserts.NoError(err)
+	followedUser1, err := FindOneUser(&UserModel{Username: "user2"})
+	asserts.NoError(err)
+	followedUser2, err := FindOneUser(&UserModel{Username: "user3"})
+	asserts.NoError(err)
+	asserts.NoError(currentUser.following(followedUser1))
+	asserts.NoError(currentUser.following(followedUser2))
+
+	req, err := http.NewRequest("GET", "/api/user/following", nil)
+	asserts.NoError(err)
+	common.HeaderTokenMock(req, currentUser.ID)
+
+	w := httptest.NewRecorder()
+	newUserFollowingTestRouter().ServeHTTP(w, req)
+
+	asserts.Equal(http.StatusOK, w.Code)
+
+	var body map[string]json.RawMessage
+	asserts.NoError(json.Unmarshal(w.Body.Bytes(), &body))
+	profilesJSON, ok := body["profiles"]
+	asserts.True(ok, "response should contain profiles key")
+
+	var profileObjects []map[string]interface{}
+	asserts.NoError(json.Unmarshal(profilesJSON, &profileObjects))
+	asserts.Len(profileObjects, 2)
+
+	expectedUsernames := map[string]bool{
+		"user2": false,
+		"user3": false,
+	}
+	for _, profile := range profileObjects {
+		asserts.Len(profile, 4)
+		for _, key := range []string{"username", "bio", "image", "following"} {
+			_, exists := profile[key]
+			asserts.True(exists, "profile should contain %s", key)
+		}
+		asserts.Equal(true, profile["following"])
+		username, ok := profile["username"].(string)
+		asserts.True(ok, "username should be a string")
+		_, expected := expectedUsernames[username]
+		asserts.True(expected, "unexpected username %s", username)
+		expectedUsernames[username] = true
+	}
+	for username, seen := range expectedUsernames {
+		asserts.True(seen, "expected username %s in response", username)
+	}
 }
 
 // This is a hack way to add test database for each case, as whole test will just share one database.
